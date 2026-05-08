@@ -28,7 +28,10 @@ export interface DownloadOptions {
     categories: SponsorBlockCategory[];
   };
   playlist: boolean;
+  maxItems: number | null;
 }
+
+export type CollectionKind = 'video' | 'playlist' | 'channel';
 
 export interface VideoInfo {
   id: string;
@@ -40,6 +43,7 @@ export interface VideoInfo {
   isLive: boolean;
   isPlaylist: boolean;
   playlistCount: number | null;
+  collectionKind: CollectionKind;
   formats: ResolvedFormatSummary;
 }
 

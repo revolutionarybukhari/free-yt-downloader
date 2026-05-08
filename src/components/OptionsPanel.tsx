@@ -1,4 +1,4 @@
-import { Download, Music2, Video } from 'lucide-react';
+import { Download, Music2, Tv, Video } from 'lucide-react';
 import type {
   DownloadKind,
   SponsorBlockCategory,
@@ -15,14 +15,18 @@ interface UiState {
   sponsorMode: SponsorBlockMode;
   sponsorCategories: SponsorBlockCategory[];
   playlist: boolean;
+  maxItems: number | null;
 }
 
 interface Props {
-  info: VideoInfo;
+  info: VideoInfo | null;
+  hasAnyCollection: boolean;
+  totalEntries: number;
   state: UiState;
   onChange: (next: UiState) => void;
   onSubmit: () => void;
   canSubmit: boolean;
+  submitLabel?: string;
 }
 
 const HEIGHT_PRESETS = [2160, 1440, 1080, 720, 480, 360];
@@ -43,9 +47,21 @@ const SPONSOR_OPTIONS: Array<{ id: SponsorBlockCategory; label: string }> = [
   { id: 'music_offtopic', label: 'Non-music (music videos)' },
 ];
 
-export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Props) => {
+export const OptionsPanel = ({
+  info,
+  hasAnyCollection,
+  totalEntries,
+  state,
+  onChange,
+  onSubmit,
+  canSubmit,
+  submitLabel,
+}: Props) => {
   const isAudio = state.selection.kind === 'audio';
-  const maxAvailable = info.formats.maxHeight || 1080;
+  const maxAvailable = info?.formats.maxHeight || 2160;
+  const has60fps = info?.formats.has60fps ?? true;
+  const hasHdr = info?.formats.hasHdr ?? false;
+  const isCollectionInfo = info?.collectionKind === 'playlist' || info?.collectionKind === 'channel';
 
   const setKind = (kind: 'video' | 'audio') => {
     if (kind === 'audio') {
@@ -60,7 +76,7 @@ export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Pro
           kind: 'video',
           maxHeight: Math.min(1080, maxAvailable),
           preferHdr: false,
-          fps60: info.formats.has60fps,
+          fps60: has60fps,
         },
       });
     }
@@ -114,7 +130,7 @@ export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Pro
           <Section label="Resolution">
             <div className="flex flex-wrap gap-1.5">
               {HEIGHT_PRESETS.map((h) => {
-                const disabled = maxAvailable > 0 && h > maxAvailable;
+                const disabled = info ? maxAvailable > 0 && h > maxAvailable : false;
                 const active = state.selection.kind === 'video' && state.selection.maxHeight === h;
                 return (
                   <button
@@ -141,16 +157,16 @@ export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Pro
             <Toggle
               label="60 fps"
               checked={state.selection.fps60}
-              disabled={!info.formats.has60fps}
+              disabled={info ? !has60fps : false}
               onChange={(v) => setVideoBool('fps60', v)}
-              hint={info.formats.has60fps ? null : 'Not available'}
+              hint={info && !has60fps ? 'Not available' : null}
             />
             <Toggle
               label="HDR"
               checked={state.selection.preferHdr}
-              disabled={!info.formats.hasHdr}
+              disabled={info ? !hasHdr : false}
               onChange={(v) => setVideoBool('preferHdr', v)}
-              hint={info.formats.hasHdr ? null : 'Not available'}
+              hint={info && !hasHdr ? 'Not available' : null}
             />
           </div>
         </div>
@@ -254,13 +270,58 @@ export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Pro
         )}
       </Section>
 
-      {info.isPlaylist && (
-        <Section label="Playlist">
-          <Toggle
-            label={`Download all ${info.playlistCount ?? ''} videos in playlist`}
-            checked={state.playlist}
-            onChange={(v) => onChange({ ...state, playlist: v })}
-          />
+      {(isCollectionInfo || hasAnyCollection) && (
+        <Section
+          label={
+            info?.collectionKind === 'channel'
+              ? 'Channel'
+              : info?.collectionKind === 'playlist'
+                ? 'Playlist'
+                : 'Collections'
+          }
+        >
+          <div className="space-y-2">
+            <Toggle
+              label={
+                info?.collectionKind === 'channel'
+                  ? `Download videos from this channel${
+                      info.playlistCount ? ` (${info.playlistCount.toLocaleString()} total)` : ''
+                    }`
+                  : info?.collectionKind === 'playlist'
+                    ? `Download every video in the playlist${
+                        info.playlistCount ? ` (${info.playlistCount} total)` : ''
+                      }`
+                    : 'Expand any playlist or channel URLs in the batch'
+              }
+              checked={state.playlist}
+              onChange={(v) => onChange({ ...state, playlist: v })}
+            />
+            {state.playlist && (
+              <div className="flex items-center gap-2 pl-6">
+                <label className="text-xs text-zinc-400">Limit to first</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5000}
+                  value={state.maxItems ?? ''}
+                  placeholder="all"
+                  onChange={(e) => {
+                    const raw = e.target.value.trim();
+                    const n = raw === '' ? null : Math.max(1, Math.min(5000, parseInt(raw, 10) || 1));
+                    onChange({ ...state, maxItems: n });
+                  }}
+                  className="px-2 py-1 rounded-md bg-zinc-800 border border-zinc-700 text-xs outline-none focus:border-red-500/50 w-20 text-right"
+                />
+                <span className="text-xs text-zinc-500">videos · leave blank for all</span>
+              </div>
+            )}
+            {info?.collectionKind === 'channel' && (
+              <p className="text-xs text-zinc-500 pl-6">
+                <Tv className="w-3 h-3 inline-block mr-1 -mt-0.5" />
+                Channels can have thousands of videos — set a limit unless you mean it.
+              </p>
+            )}
+          </div>
         </Section>
       )}
 
@@ -270,7 +331,7 @@ export const OptionsPanel = ({ info, state, onChange, onSubmit, canSubmit }: Pro
         disabled={!canSubmit}
         className="w-full px-4 py-3 rounded-xl bg-red-600 hover:bg-red-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium inline-flex items-center justify-center gap-2 transition"
       >
-        <Download className="w-4 h-4" /> Download
+        <Download className="w-4 h-4" /> {submitLabel ?? `Download${totalEntries > 1 ? ` (${totalEntries})` : ''}`}
       </button>
     </div>
   );

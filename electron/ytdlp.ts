@@ -3,11 +3,21 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { requireBinaries, resolveBinaries } from './binaries.js';
 import type {
+  CollectionKind,
   DownloadEvent,
   DownloadOptions,
   ResolvedFormatSummary,
   VideoInfo,
 } from './types.js';
+
+const MAX_CONCURRENT_DOWNLOADS = 2;
+
+const isChannelUrl = (url: string): boolean =>
+  /youtube\.com\/(@|c\/|channel\/|user\/)/i.test(url);
+
+const isPlaylistOnlyUrl = (url: string): boolean =>
+  /youtube\.com\/playlist\?/i.test(url) ||
+  (/[?&]list=/i.test(url) && !/[?&]v=/i.test(url));
 
 const execFileP = promisify(execFile);
 
@@ -67,52 +77,67 @@ const summarizeFormats = (formats: RawFormat[] | undefined): ResolvedFormatSumma
 
 export const fetchInfo = async (url: string): Promise<VideoInfo> => {
   const { ytdlp } = await requireBinaries();
+  const channelGuess = isChannelUrl(url);
+  const playlistGuess = isPlaylistOnlyUrl(url);
+  const treatAsCollection = channelGuess || playlistGuess;
+
   const args = [
     '--dump-single-json',
     '--no-warnings',
-    '--no-playlist',
     '--no-call-home',
     '--ignore-config',
-    '--flat-playlist',
+    ...(treatAsCollection ? ['--flat-playlist', '--yes-playlist'] : ['--no-playlist']),
     url,
   ];
 
   const { stdout } = await execFileP(ytdlp, args, {
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: 128 * 1024 * 1024,
   });
-
   const raw = JSON.parse(stdout) as RawInfo;
-  const isPlaylist = raw._type === 'playlist' || (raw.entries?.length ?? 0) > 0;
-  let primary: RawInfo = raw;
+  const isCollection =
+    treatAsCollection || raw._type === 'playlist' || (raw.entries?.length ?? 0) > 0;
 
-  if (isPlaylist) {
-    const single = await execFileP(ytdlp, [
-      '--dump-single-json',
-      '--no-warnings',
-      '--no-playlist',
-      '--no-call-home',
-      '--ignore-config',
-      url,
-    ], { maxBuffer: 64 * 1024 * 1024 });
-    primary = JSON.parse(single.stdout) as RawInfo;
+  if (isCollection) {
+    const collectionKind: CollectionKind = channelGuess ? 'channel' : 'playlist';
+    const firstEntry = raw.entries?.[0];
+    const thumb =
+      raw.thumbnail ??
+      raw.thumbnails?.[raw.thumbnails.length - 1]?.url ??
+      firstEntry?.thumbnail ??
+      firstEntry?.thumbnails?.[firstEntry.thumbnails.length - 1]?.url ??
+      '';
+    return {
+      id: raw.id,
+      title: raw.title ?? 'Untitled collection',
+      channel: raw.channel ?? raw.uploader ?? 'Unknown',
+      durationSeconds: 0,
+      thumbnail: thumb,
+      uploadDate: raw.upload_date ?? null,
+      isLive: false,
+      isPlaylist: true,
+      playlistCount: raw.playlist_count ?? raw.entries?.length ?? null,
+      collectionKind,
+      formats: summarizeFormats(undefined),
+    };
   }
 
   const thumb =
-    primary.thumbnail ??
-    primary.thumbnails?.[primary.thumbnails.length - 1]?.url ??
+    raw.thumbnail ??
+    raw.thumbnails?.[raw.thumbnails.length - 1]?.url ??
     '';
 
   return {
-    id: primary.id,
-    title: primary.title,
-    channel: primary.channel ?? primary.uploader ?? 'Unknown',
-    durationSeconds: primary.duration ?? 0,
+    id: raw.id,
+    title: raw.title,
+    channel: raw.channel ?? raw.uploader ?? 'Unknown',
+    durationSeconds: raw.duration ?? 0,
     thumbnail: thumb,
-    uploadDate: primary.upload_date ?? null,
-    isLive: !!primary.is_live,
-    isPlaylist,
-    playlistCount: isPlaylist ? raw.playlist_count ?? raw.entries?.length ?? null : null,
-    formats: summarizeFormats(primary.formats),
+    uploadDate: raw.upload_date ?? null,
+    isLive: !!raw.is_live,
+    isPlaylist: false,
+    playlistCount: null,
+    collectionKind: 'video',
+    formats: summarizeFormats(raw.formats),
   };
 };
 
@@ -132,8 +157,14 @@ const buildArgs = (opts: DownloadOptions, ffmpegPath: string): string[] => {
     '%(title).180B [%(id)s].%(ext)s',
   ];
 
-  if (!opts.playlist) args.push('--no-playlist');
-  else args.push('--yes-playlist');
+  if (!opts.playlist) {
+    args.push('--no-playlist');
+  } else {
+    args.push('--yes-playlist');
+    if (opts.maxItems && opts.maxItems > 0) {
+      args.push('--playlist-end', String(opts.maxItems));
+    }
+  }
 
   if (opts.selection.kind === 'audio') {
     args.push('-x', '--audio-format', opts.selection.format);
@@ -193,10 +224,49 @@ interface RunningJob {
 
 const running = new Map<string, RunningJob>();
 
+interface QueuedJob {
+  opts: DownloadOptions;
+  emit: (event: DownloadEvent) => void;
+  resolve: (value: { id: string }) => void;
+  reject: (reason: unknown) => void;
+}
+
+const pending: QueuedJob[] = [];
+
+const cancelPending = (id: string): boolean => {
+  const idx = pending.findIndex((j) => j.opts.id === id);
+  if (idx < 0) return false;
+  const [job] = pending.splice(idx, 1);
+  job.emit({ id, type: 'canceled' });
+  job.resolve({ id });
+  return true;
+};
+
+const tryStartNext = () => {
+  while (running.size < MAX_CONCURRENT_DOWNLOADS && pending.length > 0) {
+    const job = pending.shift()!;
+    runDownload(job.opts, job.emit)
+      .then(job.resolve)
+      .catch(job.reject)
+      .finally(tryStartNext);
+  }
+};
+
 const PROGRESS_RE =
   /^\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+\w+)?(?:\s+at\s+([^\s]+))?(?:\s+ETA\s+([^\s]+))?/;
 
 export const startDownload = (
+  opts: DownloadOptions,
+  emit: (event: DownloadEvent) => void,
+): Promise<{ id: string }> => {
+  return new Promise((resolve, reject) => {
+    emit({ id: opts.id, type: 'queued' });
+    pending.push({ opts, emit, resolve, reject });
+    tryStartNext();
+  });
+};
+
+const runDownload = (
   opts: DownloadOptions,
   emit: (event: DownloadEvent) => void,
 ): Promise<{ id: string }> => {
@@ -212,7 +282,6 @@ export const startDownload = (
     }
 
     const args = buildArgs(opts, bins.ffmpeg);
-    emit({ id: opts.id, type: 'queued' });
 
     const child = spawn(bins.ytdlp, args, {
       cwd: opts.outputDir,
@@ -322,6 +391,7 @@ export const startDownload = (
 };
 
 export const cancelDownload = (id: string) => {
+  if (cancelPending(id)) return;
   const job = running.get(id);
   if (!job) return;
   job.canceled = true;
@@ -344,6 +414,7 @@ export const cancelDownload = (id: string) => {
 };
 
 export const cancelAllDownloads = () => {
+  for (const job of [...pending]) cancelPending(job.opts.id);
   for (const id of [...running.keys()]) cancelDownload(id);
 };
 

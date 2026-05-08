@@ -1,7 +1,7 @@
 {
   "name": "free-yt-downloader",
   "productName": "Free YT Downloader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Free open-source YouTube downloader. 4K, HDR, MP3, subtitles, SponsorBlock. No ads, no login, no telemetry.",
   "main": "dist-electron/main.js",
   "type": "module",

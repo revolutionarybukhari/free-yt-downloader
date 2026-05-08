@@ -1,5 +1,5 @@
 import type { VideoInfo } from '../types.js';
-import { Clock, ListVideo, Radio, Sparkles, Zap } from 'lucide-react';
+import { Clock, ListVideo, Radio, Sparkles, Tv, Zap } from 'lucide-react';
 
 const formatDuration = (seconds: number): string => {
   if (!seconds) return '—';
@@ -56,10 +56,16 @@ export const VideoPreview = ({ info }: Props) => {
               <Radio className="w-3 h-3" /> Live
             </Pill>
           )}
-          {info.isPlaylist && (
+          {info.collectionKind === 'channel' && (
+            <Pill className="text-sky-300">
+              <Tv className="w-3 h-3" /> Channel
+              {info.playlistCount ? ` · ${info.playlistCount.toLocaleString()} videos` : ''}
+            </Pill>
+          )}
+          {info.collectionKind === 'playlist' && (
             <Pill>
               <ListVideo className="w-3 h-3" /> Playlist
-              {info.playlistCount ? ` · ${info.playlistCount}` : ''}
+              {info.playlistCount ? ` · ${info.playlistCount} videos` : ''}
             </Pill>
           )}
         </div>
